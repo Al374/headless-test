@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+      "api-expert-server": {
+        "command": "uv",
+        "args": [
+          "--directory",
+          "/home/ubuntu/environment/ai-code/mcp/api-helper",
+          "run",
+          "api_helper.py"
+        ],
+        "disabled": false,
+        "env": {
+          "API_EXPERT_LAMBDA_NAME": "<API EXPERT AGENT FUNCTION NAME HERE>",
+          "API_INSPECTOR_LAMBDA_NAME": "<API EXPERT AGENT FUNCTION NAME HERE>"
+        }
+      }
+
+  }
+}

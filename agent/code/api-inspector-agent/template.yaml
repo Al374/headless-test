@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  API Inspector Agent
+  
+  SAM Template for API Inspector Agent Lambda function that analyzes 
+  API Gateway configurations and provides recommendations
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 512
+    Runtime: python3.10
+
+Parameters:
+  KnowledgeBaseID:
+    Type: String
+    Description: ID of the existing knowledge base to be used by the agent
+    Default: api-inspector-ID
+  BedrockModel:
+    Type: String
+    Default: "arn:aws:bedrock:us-west-2::inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+    Description: Bedrock model ID to use for the agent
+  
+Resources:
+  ApiInspectorAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: main.lambda_handler
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          BEDROCK_MODEL: !Sub "arn:aws:bedrock:${AWS::Region}::inference-profile/${BedrockModel}"
+          KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseID
+          MIN_SCORE: '0.4'
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: 
+                - "arn:aws:bedrock:*:*:*"
+            - Effect: Allow
+              Action:
+                - bedrock:Retrieve
+              Resource: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseID}'
+            - Effect: Allow
+              Action:
+                - apigateway:GET
+              Resource: 
+                - !Sub "arn:aws:apigateway:${AWS::Region}::/restapis/*"
+                - !Sub "arn:aws:apigateway:${AWS::Region}::/account"
+                - !Sub "arn:aws:apigateway:${AWS::Region}::/vpclinks/*"
+                - !Sub "arn:aws:apigateway:${AWS::Region}::/domainnames/*"
+                - !Sub "arn:aws:apigateway:${AWS::Region}::/apikeys/*"
+                - !Sub "arn:aws:apigateway:${AWS::Region}::/usageplans/*"
+                - !Sub "arn:aws:apigateway:${AWS::Region}::/clientcertificates/*"
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+
+Outputs:
+  ApiInspectorAgentFunctionName:
+    Description: "API Inspector Agent Lambda Function Name"
+    Value: !Ref ApiInspectorAgentFunction
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiInspectorAgentFunction"
