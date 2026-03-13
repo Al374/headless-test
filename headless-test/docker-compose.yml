@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    ports:
+      - "8180:8080"
+    command: start-dev
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  firebase-emulator:
+    image: node:20-alpine
+    ports:
+      - "9099:9099"
+      - "4000:4000"
+    working_dir: /app
+    command: npx -y firebase-tools@latest emulators:start --only auth --project local-project
+    volumes:
+      - ./firebase.json:/app/firebase.json
+    environment:
+      FIREBASE_AUTH_EMULATOR_HOST: 0.0.0.0:9099

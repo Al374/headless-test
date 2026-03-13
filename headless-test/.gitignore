@@ -1,0 +1,8 @@
+# Local environment — contains secrets, never commit
+.env
+
+# Compiled Go binaries
+headless-simulator
+headless-backend
+simulator/headless-simulator
+backend/headless-backend
