@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/example/headless-simulator-wif/apigee"
 	"github.com/example/headless-simulator-wif/wif"
 )
 
@@ -32,7 +34,9 @@ func assertStatus(resp *http.Response, want int, label string) {
 	}
 }
 
-func doRequest(ctx context.Context, method, endpoint, token string, body []byte) *http.Response {
+// doRequest sends an HTTP request with an optional Bearer token and extra headers.
+// Pass nil for extraHeaders when not needed.
+func doRequest(ctx context.Context, method, endpoint, token string, body []byte, extraHeaders map[string]string) *http.Response {
 	var reqBody io.Reader
 	if body != nil {
 		reqBody = bytes.NewReader(body)
@@ -46,6 +50,9 @@ func doRequest(ctx context.Context, method, endpoint, token string, body []byte)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -116,6 +123,10 @@ func decodeIDTokenClaims(idToken string) (map[string]interface{}, error) {
 }
 
 func main() {
+	viaApigee := flag.Bool("via-apigee", false,
+		"route API calls through Apigee: sends Apigee token as Bearer and Firebase JWT as X-FB-TOKEN")
+	flag.Parse()
+
 	ctx := context.Background()
 	backendURL := mustEnv("BACKEND_URL")
 
@@ -199,16 +210,44 @@ func main() {
 		}
 	}
 
-	// ── API assertions ─────────────────────────────────────────────────────────
-	payload, _ := json.Marshal(map[string]string{"name": "wif-test-user"})
+	// ── Apigee mode: fetch Apigee token, route requests through Apigee ────────
+	// bearerToken is what goes in Authorization: Bearer.
+	// extraHeaders carries X-FB-TOKEN when routing through Apigee.
+	bearerToken := idToken
+	var extraHeaders map[string]string
 
-	resp := doRequest(ctx, http.MethodPost, backendURL+"/api/users", idToken, payload)
+	if *viaApigee {
+		fmt.Print("[option-b] fetching Apigee token...          ")
+		apigeeToken, err := apigee.FetchToken(ctx, apigee.Config{
+			TokenURL:     mustEnv("APIGEE_TOKEN_URL"),
+			ClientID:     mustEnv("APIGEE_CLIENT_ID"),
+			ClientSecret: mustEnv("APIGEE_CLIENT_SECRET"),
+			Scope:        os.Getenv("APIGEE_SCOPE"),       // optional
+			AuthScheme:   os.Getenv("APIGEE_AUTH_SCHEME"), // "basic" (default) or "body"
+		})
+		if err != nil {
+			log.Fatalf("apigee: %v", err)
+		}
+		fmt.Println("OK")
+		fmt.Println("    route: Authorization=Apigee token  X-FB-TOKEN=Firebase JWT")
+
+		// Send Apigee token as Bearer; Firebase JWT travels in X-FB-TOKEN.
+		// Apigee validates the Bearer token, then replaces it with X-FB-TOKEN
+		// before forwarding to the backend — matching the production flow.
+		bearerToken = apigeeToken
+		extraHeaders = map[string]string{"X-FB-TOKEN": idToken}
+	}
+
+	// ── API assertions ─────────────────────────────────────────────────────────
+	apiPayload, _ := json.Marshal(map[string]string{"name": "wif-test-user"})
+
+	resp := doRequest(ctx, http.MethodPost, backendURL+"/api/users", bearerToken, apiPayload, extraHeaders)
 	assertStatus(resp, http.StatusCreated, "[option-b] POST /api/users")
 
-	resp = doRequest(ctx, http.MethodGet, backendURL+"/api/users", idToken, nil)
+	resp = doRequest(ctx, http.MethodGet, backendURL+"/api/users", bearerToken, nil, extraHeaders)
 	assertStatus(resp, http.StatusOK, "[option-b] GET  /api/users")
 
-	resp = doRequest(ctx, http.MethodPost, backendURL+"/api/users", "", payload)
+	resp = doRequest(ctx, http.MethodPost, backendURL+"/api/users", "", apiPayload, nil)
 	assertStatus(resp, http.StatusUnauthorized, "[option-b] no token        ")
 
 	fmt.Println("All Option B assertions passed.")
