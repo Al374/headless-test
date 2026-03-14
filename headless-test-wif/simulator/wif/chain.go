@@ -36,9 +36,10 @@ type Config struct {
 	ServiceAccountEmail string // e.g. "simulator-sa@project.iam.gserviceaccount.com"
 
 	// Firebase
-	ProjectID string // GCP project ID == Firebase project ID
-	APIKey    string // Firebase Web API Key (from Firebase console)
-	UID       string // uid embedded in the Firebase custom token (any non-empty string)
+	ProjectID    string                 // GCP project ID == Firebase project ID
+	APIKey       string                 // Firebase Web API Key (from Firebase console)
+	UID          string                 // uid embedded in the Firebase custom token (any non-empty string)
+	CustomClaims map[string]interface{} // optional; propagated into the Firebase ID token as top-level claims
 
 	// Override base URLs — leave empty in production; set in unit tests.
 	OverrideSTSURL string // replaces https://sts.googleapis.com
@@ -173,15 +174,20 @@ func SignFirebaseCustomToken(ctx context.Context, cfg Config, saToken string) (s
 	}
 	now := time.Now().Unix()
 
+	claims := cfg.CustomClaims
+	if claims == nil {
+		claims = map[string]interface{}{}
+	}
+
 	// Firebase custom token payload — must be a JSON string inside the outer request.
 	payload, err := json.Marshal(map[string]interface{}{
-		"iss": cfg.ServiceAccountEmail,
-		"sub": cfg.ServiceAccountEmail,
-		"aud": "https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit",
-		"iat": now,
-		"exp": now + 3600,
-		"uid": uid,
-		"claims": map[string]interface{}{},
+		"iss":    cfg.ServiceAccountEmail,
+		"sub":    cfg.ServiceAccountEmail,
+		"aud":    "https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit",
+		"iat":    now,
+		"exp":    now + 3600,
+		"uid":    uid,
+		"claims": claims,
 	})
 	if err != nil {
 		return "", err

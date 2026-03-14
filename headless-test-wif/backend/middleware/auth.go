@@ -2,8 +2,12 @@
 // by Google's securetoken service (real Firebase, not the emulator).
 //
 // Configuration (env vars):
-//   GCP_PROJECT_ID  — Firebase project ID; determines issuer and audience.
-//   JWKS_URL        — optional override for the Firebase JWKS endpoint.
+//   GCP_PROJECT_ID        — Firebase project ID; determines issuer and audience.
+//   JWKS_URL              — optional override for the Firebase JWKS endpoint.
+//   BACKEND_REQUIRED_ROLE — optional role check, format "field:value"
+//                           e.g. "htpa_roles:HTPA_USER"
+//                           The named claim must be a string equal to value,
+//                           or an array containing value. Returns 403 if absent.
 package middleware
 
 import (
@@ -34,6 +38,12 @@ var firebaseConfig struct {
 	audience string // == GCP project ID
 }
 
+// requiredRole holds the optional role claim check parsed from BACKEND_REQUIRED_ROLE.
+var requiredRole struct {
+	field string // claim field name, e.g. "htpa_roles"
+	value string // required value, e.g. "HTPA_USER"
+}
+
 func init() {
 	projectID := os.Getenv("GCP_PROJECT_ID")
 	if projectID == "" {
@@ -46,6 +56,18 @@ func init() {
 	// Allow explicit override (useful for testing).
 	if v := os.Getenv("JWKS_URL"); v != "" {
 		firebaseConfig.jwksURL = v
+	}
+
+	// Optional role enforcement: BACKEND_REQUIRED_ROLE=field:value
+	if v := os.Getenv("BACKEND_REQUIRED_ROLE"); v != "" {
+		parts := strings.SplitN(v, ":", 2)
+		if len(parts) == 2 {
+			requiredRole.field = parts[0]
+			requiredRole.value = parts[1]
+			log.Printf("role check enabled: claim %q must contain %q", requiredRole.field, requiredRole.value)
+		} else {
+			log.Printf("WARNING: BACKEND_REQUIRED_ROLE %q is not in field:value format — ignored", v)
+		}
 	}
 }
 
@@ -120,8 +142,8 @@ func (c *jwksCache) refresh(kid string) (*rsa.PublicKey, error) {
 	return nil, fmt.Errorf("key id %q not found in Firebase JWKS", kid)
 }
 
-func validateFirebase(tokenStr string) error {
-	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
+func validateFirebase(tokenStr string) (jwt.MapClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
@@ -133,12 +155,36 @@ func validateFirebase(tokenStr string) error {
 		jwt.WithExpirationRequired(),
 	)
 	if err != nil {
-		return fmt.Errorf("firebase token invalid: %w", err)
+		return nil, fmt.Errorf("firebase token invalid: %w", err)
 	}
 	if !token.Valid {
-		return fmt.Errorf("firebase token not valid")
+		return nil, fmt.Errorf("firebase token not valid")
 	}
-	return nil
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, fmt.Errorf("unexpected claims type")
+	}
+	return claims, nil
+}
+
+// hasRole returns true if claims[field] is a string equal to value,
+// or an array that contains value.
+func hasRole(claims jwt.MapClaims, field, value string) bool {
+	v, ok := claims[field]
+	if !ok {
+		return false
+	}
+	switch t := v.(type) {
+	case string:
+		return t == value
+	case []interface{}:
+		for _, item := range t {
+			if s, ok := item.(string); ok && s == value {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func unauthorized(w http.ResponseWriter) {
@@ -147,8 +193,16 @@ func unauthorized(w http.ResponseWriter) {
 	w.Write([]byte(`{"error":"unauthorized"}`))
 }
 
+func forbidden(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	w.Write([]byte(`{"error":"forbidden","reason":"missing required role"}`))
+}
+
 // ValidateToken middleware validates Firebase ID tokens issued by the real
 // Firebase Auth service (securetoken.google.com).
+// If BACKEND_REQUIRED_ROLE is set, it also enforces that the token carries the
+// required claim value, returning 403 when the claim is absent.
 func ValidateToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -158,9 +212,16 @@ func ValidateToken(next http.Handler) http.Handler {
 		}
 		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
-		if err := validateFirebase(tokenStr); err != nil {
+		claims, err := validateFirebase(tokenStr)
+		if err != nil {
 			log.Printf("auth: %v", err)
 			unauthorized(w)
+			return
+		}
+
+		if requiredRole.field != "" && !hasRole(claims, requiredRole.field, requiredRole.value) {
+			log.Printf("auth: token missing required role %s:%s", requiredRole.field, requiredRole.value)
+			forbidden(w)
 			return
 		}
 

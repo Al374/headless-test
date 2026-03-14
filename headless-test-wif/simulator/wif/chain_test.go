@@ -143,6 +143,49 @@ func TestExchangeForFirebaseIDToken_SAError(t *testing.T) {
 	}
 }
 
+func TestSignFirebaseCustomToken_WithClaims(t *testing.T) {
+	var capturedPayload map[string]interface{}
+
+	iam := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ":signJwt") {
+			// Decode the outer request body to get the inner JWT payload string.
+			var outer struct {
+				Payload string `json:"payload"`
+			}
+			json.NewDecoder(r.Body).Decode(&outer)
+			json.Unmarshal([]byte(outer.Payload), &capturedPayload)
+			json.NewEncoder(w).Encode(map[string]interface{}{"signedJwt": "signed-token"})
+			return
+		}
+		// generateAccessToken
+		json.NewEncoder(w).Encode(map[string]interface{}{"accessToken": "sa-token"})
+	}))
+	defer iam.Close()
+
+	cfg := baseConfig("", iam.URL, "")
+	cfg.CustomClaims = map[string]interface{}{
+		"htpa_roles": []string{"HTPA_USER"},
+		"tenant":     "test-tenant",
+	}
+
+	_, err := SignFirebaseCustomToken(context.Background(), cfg, "sa-token")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify claims were forwarded into the signJwt payload.
+	innerClaims, ok := capturedPayload["claims"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("claims field missing or wrong type in signJwt payload: %+v", capturedPayload)
+	}
+	if _, ok := innerClaims["htpa_roles"]; !ok {
+		t.Errorf("htpa_roles missing from claims: %+v", innerClaims)
+	}
+	if _, ok := innerClaims["tenant"]; !ok {
+		t.Errorf("tenant missing from claims: %+v", innerClaims)
+	}
+}
+
 func TestExchangeForFirebaseIDToken_FirebaseError(t *testing.T) {
 	sts := newMockSTS(t, "federated-token", http.StatusOK)
 	iam := newMockIAM(t, "sa-access-token", "signed-custom-jwt")

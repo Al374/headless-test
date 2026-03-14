@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -96,9 +97,35 @@ func fetchAzureToken(ctx context.Context) (string, error) {
 	return tr.AccessToken, nil
 }
 
+// decodeIDTokenClaims base64-decodes the payload section of a JWT and returns
+// the claims as a map. Used only for logging — not a security-sensitive path.
+func decodeIDTokenClaims(idToken string) (map[string]interface{}, error) {
+	parts := strings.Split(idToken, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("not a JWT")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, err
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
 func main() {
 	ctx := context.Background()
 	backendURL := mustEnv("BACKEND_URL")
+
+	// ── Optional: custom claims to embed in the Firebase token ─────────────────
+	var customClaims map[string]interface{}
+	if raw := os.Getenv("FIREBASE_CUSTOM_CLAIMS"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &customClaims); err != nil {
+			log.Fatalf("FIREBASE_CUSTOM_CLAIMS is not valid JSON: %v", err)
+		}
+	}
 
 	// ── Step 1: Azure token ────────────────────────────────────────────────────
 	fmt.Print("[option-b] fetching Azure token...           ")
@@ -118,10 +145,10 @@ func main() {
 		ProjectID:           mustEnv("GCP_PROJECT_ID"),
 		APIKey:              mustEnv("FIREBASE_API_KEY"),
 		UID:                 "wif-simulator-user",
+		CustomClaims:        customClaims,
 	}
 
 	fmt.Print("[option-b] WIF STS exchange...               ")
-	// Run step-by-step so we can log each phase individually.
 	fedToken, err := wif.STSExchange(ctx, cfg)
 	if err != nil {
 		log.Fatalf("%v", err)
@@ -140,7 +167,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-	fmt.Println("OK")
+	if len(customClaims) > 0 {
+		b, _ := json.Marshal(customClaims)
+		fmt.Printf("OK\n    claims injected: %s\n", b)
+	} else {
+		fmt.Println("OK")
+	}
 
 	fmt.Print("[option-b] exchanging for Firebase ID token  ")
 	idToken, err := wif.SignInWithCustomToken(ctx, cfg, customToken)
@@ -148,6 +180,24 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 	fmt.Println("OK")
+	if idClaims, err := decodeIDTokenClaims(idToken); err == nil {
+		// Print only the application-level claims (skip standard JWT fields).
+		skip := map[string]bool{
+			"iss": true, "aud": true, "auth_time": true,
+			"sub": true, "iat": true, "exp": true,
+			"firebase": true, "user_id": true,
+		}
+		appClaims := map[string]interface{}{}
+		for k, v := range idClaims {
+			if !skip[k] {
+				appClaims[k] = v
+			}
+		}
+		if len(appClaims) > 0 {
+			b, _ := json.Marshal(appClaims)
+			fmt.Printf("    id token claims: %s\n", b)
+		}
+	}
 
 	// ── API assertions ─────────────────────────────────────────────────────────
 	payload, _ := json.Marshal(map[string]string{"name": "wif-test-user"})
