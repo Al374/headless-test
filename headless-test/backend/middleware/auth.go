@@ -36,9 +36,14 @@ func init() {
 
 	// AZURE_TENANT_ID set to a real tenant UUID → use Azure AD endpoints.
 	// When it is "test" (Keycloak local mode) the defaults above are used.
+	// Azure issues v1.0 tokens by default (accessTokenAcceptedVersion=null in manifest).
+	// v1 tokens carry issuer "https://sts.windows.net/{tenant}/" and use the /keys JWKS URL.
+	// v2 tokens carry issuer "https://login.microsoftonline.com/{tenant}/v2.0" and use /v2.0/keys.
+	// The /v2.0/keys endpoint serves both v1 and v2 signing keys, so we use it for both.
 	if tid := os.Getenv("AZURE_TENANT_ID"); tid != "" && tid != "test" {
-		jwksConfig.jwksURL  = "https://login.microsoftonline.com/" + tid + "/discovery/v2.0/keys"
-		jwksConfig.issuer   = "https://login.microsoftonline.com/" + tid + "/v2.0"
+		jwksConfig.jwksURL = "https://login.microsoftonline.com/" + tid + "/discovery/v2.0/keys"
+		// Default to v1 issuer; override with JWT_ISSUER if the app uses v2 tokens.
+		jwksConfig.issuer = "https://sts.windows.net/" + tid + "/"
 	}
 	// Allow explicit overrides regardless of AZURE_TENANT_ID.
 	if v := os.Getenv("JWKS_URL");    v != "" { jwksConfig.jwksURL  = v }
