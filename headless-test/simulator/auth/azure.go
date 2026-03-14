@@ -65,8 +65,13 @@ func (p *AzureTokenProvider) fetchToken(ctx context.Context) (string, int, error
 	form.Set("grant_type", "client_credentials")
 	form.Set("client_id", p.cfg.ClientID)
 	form.Set("client_secret", p.cfg.ClientSecret)
-	// Keycloak uses direct scope names; Azure would use "<audience>/.default".
-	form.Set("scope", "openid")
+	// Azure AD requires "<audience>/.default" as the scope for client credentials.
+	// Keycloak uses plain "openid". Auto-detect based on the token URL.
+	scope := "openid"
+	if strings.Contains(p.cfg.TokenURL, "microsoftonline.com") {
+		scope = p.cfg.Audience + "/.default"
+	}
+	form.Set("scope", scope)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.cfg.TokenURL,
 		strings.NewReader(form.Encode()))

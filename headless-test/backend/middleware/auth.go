@@ -18,11 +18,33 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const (
-	keycloakJWKSURL = "http://localhost:8180/realms/test/protocol/openid-connect/certs"
-	keycloakIssuer  = "http://localhost:8180/realms/test"
-	backendAudience = "backend-api"
-)
+const defaultJWKSURL   = "http://localhost:8180/realms/test/protocol/openid-connect/certs"
+const defaultIssuer    = "http://localhost:8180/realms/test"
+const defaultAudience  = "backend-api"
+
+// jwksConfig holds runtime-resolved values read once from env at startup.
+var jwksConfig struct {
+	jwksURL  string
+	issuer   string
+	audience string
+}
+
+func init() {
+	jwksConfig.jwksURL = defaultJWKSURL
+	jwksConfig.issuer  = defaultIssuer
+	jwksConfig.audience = defaultAudience
+
+	// AZURE_TENANT_ID set to a real tenant UUID → use Azure AD endpoints.
+	// When it is "test" (Keycloak local mode) the defaults above are used.
+	if tid := os.Getenv("AZURE_TENANT_ID"); tid != "" && tid != "test" {
+		jwksConfig.jwksURL  = "https://login.microsoftonline.com/" + tid + "/discovery/v2.0/keys"
+		jwksConfig.issuer   = "https://login.microsoftonline.com/" + tid + "/v2.0"
+	}
+	// Allow explicit overrides regardless of AZURE_TENANT_ID.
+	if v := os.Getenv("JWKS_URL");    v != "" { jwksConfig.jwksURL  = v }
+	if v := os.Getenv("JWT_ISSUER");  v != "" { jwksConfig.issuer   = v }
+	if v := os.Getenv("BACKEND_CLIENT_ID"); v != "" { jwksConfig.audience = v }
+}
 
 // jwksCache caches public keys fetched from a JWKS endpoint.
 type jwksCache struct {
@@ -31,7 +53,7 @@ type jwksCache struct {
 	fetched time.Time
 }
 
-var keycloakCache = &jwksCache{keys: map[string]*rsa.PublicKey{}}
+var rsaCache = &jwksCache{keys: map[string]*rsa.PublicKey{}}
 
 type jwksResponse struct {
 	Keys []struct {
@@ -56,7 +78,7 @@ func (c *jwksCache) refresh(kid string) (*rsa.PublicKey, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	resp, err := http.Get(keycloakJWKSURL)
+	resp, err := http.Get(jwksConfig.jwksURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetching JWKS: %w", err)
 	}
@@ -95,16 +117,18 @@ func (c *jwksCache) refresh(kid string) (*rsa.PublicKey, error) {
 	return nil, fmt.Errorf("key id %q not found in JWKS", kid)
 }
 
-func validateKeycloak(tokenStr string) error {
+// validateRS256JWT validates a token using the configured JWKS endpoint and issuer.
+// Works for both Keycloak and Azure AD — both use RS256 + JWKS.
+func validateRS256JWT(tokenStr string) error {
 	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
 		kid, _ := t.Header["kid"].(string)
-		return keycloakCache.get(kid)
-	}, jwt.WithIssuer(keycloakIssuer), jwt.WithExpirationRequired())
+		return rsaCache.get(kid)
+	}, jwt.WithIssuer(jwksConfig.issuer), jwt.WithExpirationRequired())
 	if err != nil {
-		return fmt.Errorf("keycloak token invalid: %w", err)
+		return fmt.Errorf("token invalid: %w", err)
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
@@ -112,21 +136,21 @@ func validateKeycloak(tokenStr string) error {
 		return fmt.Errorf("claims not map")
 	}
 
-	// Check audience contains backend-api.
+	// Check audience contains the expected backend client ID.
 	audOK := false
 	switch v := claims["aud"].(type) {
 	case string:
-		audOK = v == backendAudience
+		audOK = v == jwksConfig.audience
 	case []interface{}:
 		for _, a := range v {
-			if s, ok := a.(string); ok && s == backendAudience {
+			if s, ok := a.(string); ok && s == jwksConfig.audience {
 				audOK = true
 				break
 			}
 		}
 	}
 	if !audOK {
-		return fmt.Errorf("audience %v does not contain %q", claims["aud"], backendAudience)
+		return fmt.Errorf("audience %v does not contain %q", claims["aud"], jwksConfig.audience)
 	}
 	return nil
 }
@@ -197,7 +221,7 @@ func ValidateToken(next http.Handler) http.Handler {
 		if emulatorHost != "" && (strings.Contains(iss, "firebase") || strings.Contains(iss, "securetoken")) {
 			validationErr = validateFirebaseEmulator(tokenStr)
 		} else {
-			validationErr = validateKeycloak(tokenStr)
+			validationErr = validateRS256JWT(tokenStr)
 		}
 
 		if validationErr != nil {
