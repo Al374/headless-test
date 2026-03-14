@@ -74,13 +74,30 @@ The script:
 
 ## Step 3 — Enable Firebase Auth
 
-The setup script cannot do this via `gcloud` — it requires the Firebase console:
+The setup script cannot enable Firebase Authentication via `gcloud` — this step requires
+the Firebase console:
 
 1. Go to https://console.firebase.google.com
 2. Select (or add) your lab project
 3. Click **Authentication → Get started**
 4. No sign-in providers needed — custom tokens work without any provider enabled
-5. Copy the **Web API Key** from **Project Settings → General**
+
+**Get the Web API Key** after enabling Auth:
+
+- Firebase console → **Project Settings → General → Web API Key**
+- Or, if you already have a Firebase web app registered, get it headlessly:
+
+```bash
+APP_NAME=$(curl -s \
+  "https://firebase.googleapis.com/v1beta1/projects/$GCP_PROJECT_ID/webApps" \
+  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['apps'][0]['name'])")
+
+curl -s \
+  "https://firebase.googleapis.com/v1beta1/${APP_NAME}/config" \
+  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['apiKey'])"
+```
 
 ---
 
@@ -189,3 +206,4 @@ cd ../simulator && go run .
 | `INVALID_AUDIENCE` from backend | `GCP_PROJECT_ID` in backend doesn't match Firebase project | Ensure backend is started with correct `GCP_PROJECT_ID` |
 | Firebase token signature invalid | Backend JWKS cache stale | Restart the backend |
 | `APIs not enabled` | New lab project needs API activation | Re-run `gcp-setup.sh` (it enables APIs automatically) |
+| `CONFIGURATION_NOT_FOUND` from Firebase | Firebase Authentication not initialized | Go to Firebase console → Authentication → Get started |
